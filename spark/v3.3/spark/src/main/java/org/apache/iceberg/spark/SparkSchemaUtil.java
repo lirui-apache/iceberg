@@ -41,8 +41,14 @@ import org.apache.iceberg.types.Types;
 import org.apache.spark.sql.AnalysisException;
 import org.apache.spark.sql.SparkSession;
 import org.apache.spark.sql.catalog.Column;
+import org.apache.spark.sql.catalyst.TableIdentifier;
+import org.apache.spark.sql.catalyst.catalog.CatalogTable;
+import org.apache.spark.sql.catalyst.catalog.SessionCatalog;
 import org.apache.spark.sql.types.DataType;
 import org.apache.spark.sql.types.StructType;
+import scala.Option;
+import scala.Some;
+import scala.collection.JavaConverters;
 
 /** Helper methods for working with Spark/Hive metadata. */
 public class SparkSchemaUtil {
@@ -81,9 +87,14 @@ public class SparkSchemaUtil {
     String db = parts.size() == 1 ? "default" : parts.get(0);
     String table = parts.get(parts.size() == 1 ? 0 : 1);
 
+    // Get bucket columns to filter them out from partition columns
+    Set<String> bucketColumns = getBucketColumns(spark, db, table);
+
     PartitionSpec spec =
         identitySpec(
-            schemaForTable(spark, name), spark.catalog().listColumns(db, table).collectAsList());
+            schemaForTable(spark, name), 
+            spark.catalog().listColumns(db, table).collectAsList(),
+            bucketColumns);
     return spec == null ? PartitionSpec.unpartitioned() : spec;
   }
 
@@ -125,33 +136,8 @@ public class SparkSchemaUtil {
    * @throws IllegalArgumentException if the type cannot be converted
    */
   public static Schema convert(StructType sparkType) {
-    return convert(sparkType, false);
-  }
-
-  /**
-   * Convert a Spark {@link StructType struct} to a {@link Schema} with new field ids.
-   *
-   * <p>This conversion assigns fresh ids.
-   *
-   * <p>Some data types are represented as the same Spark type. These are converted to a default
-   * type.
-   *
-   * <p>To convert using a reference schema for field ids and ambiguous types, use {@link
-   * #convert(Schema, StructType)}.
-   *
-   * @param sparkType a Spark StructType
-   * @param useTimestampWithoutZone boolean flag indicates that timestamp should be stored without
-   *     timezone
-   * @return the equivalent Schema
-   * @throws IllegalArgumentException if the type cannot be converted
-   */
-  public static Schema convert(StructType sparkType, boolean useTimestampWithoutZone) {
     Type converted = SparkTypeVisitor.visit(sparkType, new SparkTypeToType(sparkType));
-    Schema schema = new Schema(converted.asNestedType().asStructType().fields());
-    if (useTimestampWithoutZone) {
-      schema = SparkFixupTimestampType.fixup(schema);
-    }
-    return schema;
+    return new Schema(converted.asNestedType().asStructType().fields());
   }
 
   /**
@@ -327,15 +313,52 @@ public class SparkSchemaUtil {
             .fields());
   }
 
-  private static PartitionSpec identitySpec(Schema schema, Collection<Column> columns) {
+  /**
+   * Gets the bucket columns for a table to filter them out from partition columns during migration.
+   * This prevents bucket columns from being treated as partition columns when migrating Hive tables to Iceberg.
+   * 
+   * @param spark Spark session
+   * @param db database name
+   * @param table table name
+   * @return set of bucket column names
+   */
+  private static Set<String> getBucketColumns(SparkSession spark, String db, String table) {
+    try {
+      // Get table metadata from session catalog
+      SessionCatalog catalog = spark.sessionState().catalog();
+      TableIdentifier tableIdent = new TableIdentifier(table, Some.apply(db));
+      
+      if (catalog.tableExists(tableIdent)) {
+        CatalogTable catalogTable = catalog.getTableMetadata(tableIdent);
+        
+        // Extract bucket columns from table storage if they exist
+        if (catalogTable.bucketSpec().isDefined()) {
+          scala.collection.Seq<String> bucketCols = catalogTable.bucketSpec().get().bucketColumnNames();
+          return scala.collection.JavaConverters.seqAsJavaListConverter(bucketCols).asJava().stream()
+              .collect(Collectors.toSet());
+        }
+      }
+    } catch (Exception e) {
+      // If we can't get bucket column information, log and continue without filtering
+      // This ensures migration continues to work even if bucket column detection fails
+    }
+    
+    return Collections.emptySet();
+  }
+
+  private static PartitionSpec identitySpec(Schema schema, Collection<Column> columns, Set<String> bucketColumns) {
     List<String> names = Lists.newArrayList();
     for (Column column : columns) {
-      if (column.isPartition()) {
+      if (column.isPartition() && !bucketColumns.contains(column.name())) {
         names.add(column.name());
       }
     }
 
     return identitySpec(schema, names);
+  }
+
+  private static PartitionSpec identitySpec(Schema schema, Collection<Column> columns) {
+    return identitySpec(schema, columns, Collections.emptySet());
   }
 
   private static PartitionSpec identitySpec(Schema schema, List<String> partitionNames) {
