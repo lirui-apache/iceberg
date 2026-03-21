@@ -148,6 +148,27 @@ public interface RewriteDataFiles
   String OUTPUT_SPEC_ID = "output-spec-id";
 
   /**
+   * When set to true, rewritten files will use the same partition spec as their input files,
+   * instead of the current table spec.
+   *
+   * <p>This is useful when the partition spec has been evolved to be finer-grained (e.g. a new
+   * partition field was added). Without this option, compacting old files would write output files
+   * using the new spec, potentially producing more small files than the inputs instead of fewer.
+   *
+   * <p>When this option is enabled, input files are grouped by their source partition spec and each
+   * group is written back using that same spec. This guarantees that compaction never increases the
+   * file count due to partition evolution.
+   *
+   * <p>Note: Cannot be combined with {@link #OUTPUT_SPEC_ID}; an error will be thrown if both are
+   * set.
+   *
+   * <p>Defaults to false.
+   */
+  String USE_INPUT_SPEC = "use-input-spec";
+
+  boolean USE_INPUT_SPEC_DEFAULT = false;
+
+  /**
    * Choose BINPACK as a strategy for this rewrite operation
    *
    * @return this for method chaining

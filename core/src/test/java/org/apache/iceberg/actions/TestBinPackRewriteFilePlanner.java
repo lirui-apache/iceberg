@@ -292,7 +292,9 @@ class TestBinPackRewriteFilePlanner {
                 BinPackRewriteFilePlanner.DELETE_FILE_THRESHOLD,
                 BinPackRewriteFilePlanner.DELETE_RATIO_THRESHOLD,
                 RewriteDataFiles.REWRITE_JOB_ORDER,
-                BinPackRewriteFilePlanner.MAX_FILES_TO_REWRITE));
+                BinPackRewriteFilePlanner.MAX_FILES_TO_REWRITE,
+                RewriteDataFiles.USE_INPUT_SPEC,
+                RewriteDataFiles.OUTPUT_SPEC_ID));
   }
 
   @Test
@@ -600,5 +602,91 @@ class TestBinPackRewriteFilePlanner {
         .withPartitionPath(partitionPath)
         .withRecordCount(1)
         .build();
+  }
+
+  @Test
+  void testUseInputSpecWithMaxFilesToRewrite() {
+    addFiles();
+    int oldSpecId = table.spec().specId();
+
+    table.updateSpec().addField("id").commit();
+    table.refresh();
+
+    Map<String, String> options = Maps.newHashMap(REWRITE_ALL);
+    options.put(RewriteDataFiles.USE_INPUT_SPEC, "true");
+    options.put(BinPackRewriteFilePlanner.MAX_FILES_TO_REWRITE, "2");
+
+    BinPackRewriteFilePlanner planner = new BinPackRewriteFilePlanner(table);
+    planner.init(options);
+
+    FileRewritePlan<FileGroupInfo, FileScanTask, DataFile, RewriteFileGroup> plan = planner.plan();
+    List<RewriteFileGroup> groups = Lists.newArrayList(plan.groups().iterator());
+
+    int totalFiles =
+        groups.stream()
+            .map(RewriteGroupBase::fileScanTasks)
+            .mapToInt(List::size)
+            .sum();
+    assertThat(totalFiles).isLessThanOrEqualTo(2);
+
+    groups.forEach(
+        group ->
+            assertThat(group.outputSpecId())
+                .as("Groups should use input spec")
+                .isEqualTo(oldSpecId));
+  }
+
+  @Test
+  void testUseInputSpec() {
+    // Write files under the original (coarser) partition spec
+    addFiles();
+    int oldSpecId = table.spec().specId();
+
+    // Evolve the partition spec to be finer-grained (add a new partition field)
+    table.updateSpec().addField("id").commit();
+    table.refresh();
+    int newSpecId = table.spec().specId();
+    assertThat(newSpecId).isNotEqualTo(oldSpecId);
+
+    // With use-input-spec=true, each group should be written back using the input (old) spec
+    Map<String, String> options = Maps.newHashMap(REWRITE_ALL);
+    options.put(RewriteDataFiles.USE_INPUT_SPEC, "true");
+
+    BinPackRewriteFilePlanner planner = new BinPackRewriteFilePlanner(table);
+    planner.init(options);
+
+    FileRewritePlan<FileGroupInfo, FileScanTask, DataFile, RewriteFileGroup> plan = planner.plan();
+    List<RewriteFileGroup> groups = Lists.newArrayList(plan.groups().iterator());
+
+    assertThat(groups).isNotEmpty();
+    groups.forEach(
+        group ->
+            assertThat(group.outputSpecId())
+                .as("Groups should use input spec, not current (finer) spec")
+                .isEqualTo(oldSpecId));
+  }
+
+  @Test
+  void testUseInputSpecDefaultFalse() {
+    // With use-input-spec not set (default false), output should use current spec
+    addFiles();
+    int oldSpecId = table.spec().specId();
+
+    table.updateSpec().addField("id").commit();
+    table.refresh();
+    int newSpecId = table.spec().specId();
+
+    BinPackRewriteFilePlanner planner = new BinPackRewriteFilePlanner(table);
+    planner.init(REWRITE_ALL);
+
+    FileRewritePlan<FileGroupInfo, FileScanTask, DataFile, RewriteFileGroup> plan = planner.plan();
+    List<RewriteFileGroup> groups = Lists.newArrayList(plan.groups().iterator());
+
+    assertThat(groups).isNotEmpty();
+    groups.forEach(
+        group ->
+            assertThat(group.outputSpecId())
+                .as("Default behavior should use current (new) spec")
+                .isEqualTo(newSpecId));
   }
 }

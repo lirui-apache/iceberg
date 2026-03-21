@@ -127,6 +127,7 @@ public abstract class SizeBasedFileRewritePlanner<
   private long maxGroupSize;
   private long maxGroupCount;
   private int outputSpecId;
+  private boolean useInputSpec;
 
   protected SizeBasedFileRewritePlanner(Table table) {
     this.table = table;
@@ -149,7 +150,9 @@ public abstract class SizeBasedFileRewritePlanner<
         MAX_FILE_SIZE_BYTES,
         MIN_INPUT_FILES,
         REWRITE_ALL,
-        MAX_FILE_GROUP_SIZE_BYTES);
+        MAX_FILE_GROUP_SIZE_BYTES,
+        RewriteDataFiles.USE_INPUT_SPEC,
+        RewriteDataFiles.OUTPUT_SPEC_ID);
   }
 
   @Override
@@ -162,7 +165,17 @@ public abstract class SizeBasedFileRewritePlanner<
     this.rewriteAll = rewriteAll(options);
     this.maxGroupSize = maxGroupSize(options);
     this.maxGroupCount = maxGroupCount(options);
+    boolean inputSpec =
+        PropertyUtil.propertyAsBoolean(
+            options, RewriteDataFiles.USE_INPUT_SPEC, RewriteDataFiles.USE_INPUT_SPEC_DEFAULT);
+    Preconditions.checkArgument(
+        !inputSpec || !options.containsKey(RewriteDataFiles.OUTPUT_SPEC_ID),
+        "Cannot use both %s and %s",
+        RewriteDataFiles.USE_INPUT_SPEC, RewriteDataFiles.OUTPUT_SPEC_ID);
     this.outputSpecId = outputSpecId(options);
+    this.useInputSpec =
+        PropertyUtil.propertyAsBoolean(
+            options, RewriteDataFiles.USE_INPUT_SPEC, RewriteDataFiles.USE_INPUT_SPEC_DEFAULT);
 
     if (rewriteAll) {
       LOG.info("Configured to rewrite all provided files in table {}", table.name());
@@ -280,6 +293,10 @@ public abstract class SizeBasedFileRewritePlanner<
 
   protected int outputSpecId() {
     return outputSpecId;
+  }
+
+  protected boolean useInputSpec() {
+    return useInputSpec;
   }
 
   private int outputSpecId(Map<String, String> options) {
